@@ -4,13 +4,10 @@
 #include <cmath>
 #include <iostream>
 
-#define Br 32
-#define Bc 32
-#define d 64
+#define Br 16
+#define Bc 16
+#define d 32
 /*
-ToDo:
-1. Debug done, implement atomicmaxFLoat
-2. test further
 */
 __device__ __forceinline__ 
 float atomicMaxFloat(float* addr, float val)
@@ -65,6 +62,7 @@ void fwd_pass_kernel(float* Q,
             for(int col = threadIdx.x; col<Bc;col+=blockDim.x)
             {
                 int global_row = i*Br + row;
+                int global_idx = global_row*d + col;
                 Q_i[row][col] = Q[global_row*d + col]; 
             }
         }
@@ -124,7 +122,7 @@ void fwd_pass_kernel(float* Q,
                     row_max = fmaxf(row_max,S_i[row][col]);
                 }
                 float m_i_new = fmaxf(m_i_old,row_max);
-                atomicMaxFloat(&m_i[row],m_i_new);
+                m_i[row] = m_i_new;
         __syncthreads();
 
                 // after updated maximum, calculate the shifted probability tile. Shifted because exponents have a tendency to explode.
@@ -155,6 +153,7 @@ void fwd_pass_kernel(float* Q,
                         {
                             sum += P_i[row][col]*V_j[col][d_idx];
                         }
+                        O_i[row][d_idx] = sum;
                     }
                 }
                 // O_i^j with the exp scaling factor.
@@ -204,8 +203,8 @@ torch::Tensor fwd_pass(torch::Tensor Q,torch::Tensor K,torch::Tensor V)
 
     int N = Q.size(0);
 
-    int Tr = N+Br-1/Br; 
-    int Tc = N+Bc-1/Bc; 
+    int Tr = (N+Br-1)/Br; 
+    int Tc = (N+Bc-1)/Bc; 
 
     float softmax_scale = 1.0f/sqrtf(d);
 
@@ -214,12 +213,18 @@ torch::Tensor fwd_pass(torch::Tensor Q,torch::Tensor K,torch::Tensor V)
     K = K.contiguous().to(torch::kCUDA);
 
     auto O = torch::zeros({N,d},Q.options());
-
+    // Error handling for tensor initialization
+    if (Q.device().is_cuda() && V.device().is_cuda() && K.device().is_cuda()) {
+        std::cout << "Memory transfer to GPU successful." << std::endl;
+    } else {
+        std::cerr << "Error: Tensors not properly transferred to CUDA." << std::endl;
+        return O;
+    }
     
     dim3 blockDim(Br,Bc);
     dim3 gridDim(Tr,Tc);
 
-    fwd_pass_kernel<<<blockDim,gridDim>>>(
+    fwd_pass_kernel<<<gridDim,blockDim>>>(
             Q.data_ptr<float>(),
             V.data_ptr<float>(),
             K.data_ptr<float>(),
